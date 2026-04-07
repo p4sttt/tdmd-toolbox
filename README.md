@@ -1,3 +1,3 @@
-# Dynamic Mode Decomposition Implementation
+# Tensor Dynamic Mode Decomposition Toolbox
 
-Реализация алгоритма динамической модовой декомпозиции и визаулизаций ее применения на разных примерах
+# TODO: create short reade with instruction by installation using uv
