@@ -31,35 +31,6 @@ class LinearTransform(ABC):
         """Compute the t-product induced by this transform."""
         return self.from_slices(self.to_slices(A) @ self.to_slices(B))
 
-    def t_transpose(self, A: jax.Array) -> jax.Array:
-        """Tensor transpose defined by conjugate-transposing transformed slices."""
-        A_hat_h = jnp.swapaxes(jnp.conjugate(self.to_slices(A)), 1, 2)
-        return self.from_slices(A_hat_h)
-
-    def fdiag_inverse(self, A: jax.Array) -> jax.Array:
-        """Invert a tensor whose transformed frontal slices are diagonal matrices."""
-        A_hat = self.to_slices(A)
-        diag = jnp.diagonal(A_hat, axis1=1, axis2=2)
-        eye = jnp.eye(A.shape[0], dtype=A_hat.dtype)[None, :, :]
-        return self.from_slices((1.0 / diag)[:, :, None] * eye)
-
-    def fdiag_pinv(self, A: jax.Array, threshold: float = 0.0) -> jax.Array:
-        """Pseudo-invert diagonal transformed slices, zeroing entries below ``threshold``."""
-        A_hat = self.to_slices(A)
-        diag = jnp.diagonal(A_hat, axis1=1, axis2=2)
-        mask = jnp.abs(diag) > threshold
-        safe_diag = jnp.where(mask, diag, jnp.ones_like(diag))
-        inv_diag = jnp.where(mask, 1.0 / safe_diag, jnp.zeros_like(diag))
-        eye = jnp.eye(A.shape[0], dtype=A_hat.dtype)[None, :, :]
-        return self.from_slices(inv_diag[:, :, None] * eye)
-
-    def eig_tensor(self, A: jax.Array) -> tuple[jax.Array, jax.Array]:
-        """Eigen-decompose each transformed frontal slice and map back."""
-        A_hat = self.to_slices(A)
-        eigenvalues, W_hat = jnp.linalg.eig(A_hat)
-        D_hat = eigenvalues[:, :, None] * jnp.eye(A.shape[0], dtype=eigenvalues.dtype)[None, :, :]
-        return self.from_slices(W_hat), self.from_slices(D_hat)
-
     def debug_assert_last_axis_preserved(self, x: jax.Array) -> None:
         """Assert that the transform preserves the input tensor shape."""
         x_hat = self.apply(x)

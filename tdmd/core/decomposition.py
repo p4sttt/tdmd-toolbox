@@ -2,6 +2,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsc
 
 from tdmd.core.tensor_product import LinearTransform
 
@@ -61,12 +62,17 @@ def _resolve_rank_from_spectrum(
 
 
 @jax.jit
-def _tsvd_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Array]:
+def _tsvd_slices_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Array]:
     A_hat = L.to_slices(A)
-    U_hat, sing_vals, Vh_hat = jnp.linalg.svd(A_hat, full_matrices=False)
-    rank = sing_vals.shape[1]
-    eye = jnp.eye(rank, dtype=sing_vals.dtype)[None, :, :]
-    S_hat = sing_vals[:, :, None] * eye
+    return jsc.linalg.svd(A_hat, full_matrices=False)
+
+
+@jax.jit
+def _tsvd_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Array]:
+    U_hat, Sigma, Vh_hat = _tsvd_slices_impl(A, L)
+    rank = Sigma.shape[1]
+    eye = jnp.eye(rank, dtype=Sigma.dtype)[None, :, :]
+    S_hat = Sigma[:, :, None] * eye
     return L.from_slices(U_hat), L.from_slices(S_hat), L.from_slices(Vh_hat)
 
 
@@ -96,8 +102,7 @@ def tsvd(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Ar
 def tensor_singular_spectrum(A: jax.Array, L: LinearTransform) -> jax.Array:
     """Return per-tube singular-value magnitudes used for truncation decisions."""
     _validate_tensor_svd_inputs(A, L)
-    A_hat = L.to_slices(A)
-    _, sing_vals, _ = jnp.linalg.svd(A_hat, full_matrices=False)
+    _, sing_vals, _ = _tsvd_slices_impl(A, L)
     return jnp.linalg.norm(sing_vals, axis=0)
 
 
@@ -120,3 +125,40 @@ def truncated_tsvd(
         svd_threshold=svd_threshold,
     )
     return _truncated_tsvd_impl(A, L, resolved_rank)
+
+
+@jax.jit
+def _tschur_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array]:
+    A_hat = L.to_slices(A)
+    T_hat, Z_hat = jsc.linalg.schur(A_hat)
+    return L.from_slices(T_hat), L.from_slices(Z_hat)
+
+
+def _validate_tensor_schur_inputs(A: jax.Array, L: LinearTransform) -> None:
+    if A.ndim != 3:
+        raise ValueError(f"Expected a third-order tensor with shape (m, m, k); got ndim={A.ndim}.")
+    if min(A.shape) == 0:
+        raise ValueError(f"Tensor dimensions must be positive; got shape {A.shape}.")
+    if A.shape[0] != A.shape[1]:
+        raise ValueError(
+            f"Tensor Schur decomposition requires square frontal slices; got shape {A.shape}."
+        )
+    if __debug__:
+        L.debug_assert_last_axis_preserved(A)
+        L.debug_assert_inverse_shape(A)
+        L.debug_assert_square_slices(A)
+
+
+def tschur(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array]:
+    """Compute the tensor Schur decomposition of ``A`` under the transform ``L``.
+
+    Args:
+        A: Input tensor with square frontal slices and transform axis last.
+        L: Linear transform defining the tensor product algebra.
+
+    Returns:
+        A tuple ``(T, Z)`` where the transformed frontal slices satisfy the
+        slice-wise Schur factorization ``A_hat = Z_hat @ T_hat @ Z_hat^H``.
+    """
+    _validate_tensor_schur_inputs(A, L)
+    return _tschur_impl(A, L)

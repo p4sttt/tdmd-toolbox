@@ -2,14 +2,14 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsc
 
 from tdmd.core.decomposition import (
     _resolve_rank_from_spectrum,
-    _truncated_tsvd_impl,
+    _tsvd_slices_impl,
     _validate_truncation_policy,
-    tensor_singular_spectrum,
 )
-from tdmd.core.tensor_product import LinearTransform, star_prod
+from tdmd.core.tensor_product import LinearTransform
 
 
 def _validate_matrix_dmd_inputs(
@@ -110,25 +110,34 @@ def _validate_tensor_dmd_inputs(
 
 @partial(jax.jit, static_argnames=("rank",))
 def _tdmd_impl(
-    X: jax.Array,
+    U_hat: jax.Array,
+    S_sigma: jax.Array,
+    Vh_hat: jax.Array,
     Y: jax.Array,
     L: LinearTransform,
     rank: int,
     svd_threshold: float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
-    U, S, Vh = _truncated_tsvd_impl(X, L, rank)
+    Y_hat = L.to_slices(Y)
+    U_hat = U_hat[:, :, :rank]
+    singular_vals = S_sigma[:, :rank]
+    Vh_hat = Vh_hat[:, :rank, :]
 
-    U_r = U
-    S_r = S
-    Vh_r = Vh
+    U_h_hat = jnp.swapaxes(U_hat.conj(), 1, 2)
+    V_hat = jnp.swapaxes(Vh_hat.conj(), 1, 2)
 
-    U_r_h = L.t_transpose(U_r)
-    V_r = L.t_transpose(Vh_r)
-    S_r_inv = L.fdiag_pinv(S_r, svd_threshold)
-    A_tilde = star_prod(star_prod(star_prod(U_r_h, Y, L), V_r, L), S_r_inv, L)
-    W, D = L.eig_tensor(A_tilde)
-    modes = star_prod(star_prod(star_prod(Y, V_r, L), S_r_inv, L), W, L)
-    return modes, D
+    singular_vals_inv = jnp.where(
+        jnp.abs(singular_vals) > svd_threshold,
+        1.0 / singular_vals,
+        0.0,
+    )
+    eye = jnp.eye(rank, dtype=singular_vals.dtype)[None, :, :]
+    S_inv_hat = singular_vals_inv[:, :, None] * eye
+
+    A_tilde_hat = U_h_hat @ Y_hat @ V_hat @ S_inv_hat
+    T_hat, W_hat = jsc.linalg.schur(A_tilde_hat)
+    modes_hat = U_hat @ W_hat
+    return L.from_slices(modes_hat), L.from_slices(T_hat)
 
 
 def tdmd(
@@ -151,16 +160,17 @@ def tdmd(
         svd_threshold: Absolute singular-value cutoff used in tensor pseudo-inversion.
 
     Returns:
-        A tuple ``(modes, eigen_tensors)`` where ``modes`` contains the tensor
-        DMD modes and ``eigen_tensors`` contains the diagonal eigen-tensor of
-        the reduced operator.
+        A tuple ``(modes, schur_tensor)`` where ``modes`` contains the tensor
+        DMD modes and ``schur_tensor`` contains the tensor Schur form of the
+        reduced operator.
     """
     _validate_tensor_dmd_inputs(X, Y, L, rank, energy_threshold, svd_threshold)
-    spectrum = tensor_singular_spectrum(X, L)
+    U_hat, sigma, Vh_hat = _tsvd_slices_impl(X, L)
+    spectrum = jnp.linalg.norm(sigma, axis=0)
     resolved_rank = _resolve_rank_from_spectrum(
         spectrum,
         rank=rank,
         energy_threshold=energy_threshold,
         svd_threshold=svd_threshold,
     )
-    return _tdmd_impl(X, Y, L, resolved_rank, svd_threshold)
+    return _tdmd_impl(U_hat, sigma, Vh_hat, Y, L, resolved_rank, svd_threshold)

@@ -2,20 +2,20 @@ from tdmd.core import (
     FFTTransform,
     LinearTransform,
     MatrixTransform,
-    dmd,
     star_prod,
-    tdmd,
     truncated_tsvd,
     tsvd,
+    dmd,
+    tdmd,
 )
 
 __all__ = [
     "FFTTransform",
     "LinearTransform",
     "MatrixTransform",
-    "dmd",
     "star_prod",
-    "tdmd",
-    "truncated_tsvd",
     "tsvd",
+    "truncated_tsvd",
+    "dmd",
+    "tdmd",
 ]
