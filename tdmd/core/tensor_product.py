@@ -6,51 +6,33 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 
 class LinearTransform(ABC):
     """Abstract interface for invertible linear transforms."""
 
     @abstractmethod
-    def apply(self, x: jax.Array) -> jax.Array:
+    def apply(self, x):
         """Apply the transform"""
+        raise NotImplementedError
 
     @abstractmethod
-    def apply_inverse(self, x: jax.Array) -> jax.Array:
+    def apply_inverse(self, x):
         """Apply the inverse transform"""
+        raise NotImplementedError
 
-    def to_slices(self, x: jax.Array) -> jax.Array:
+    def to_slices(self, x: ArrayLike) -> jax.Array:
         """Map a tensor to transformed frontal slices with shape ``(k, m, n)``."""
         return self.apply(x).transpose((2, 0, 1))
 
-    def from_slices(self, x_hat: jax.Array) -> jax.Array:
+    def from_slices(self, x_hat: ArrayLike) -> jax.Array:
         """Map transformed frontal slices with shape ``(k, m, n)`` back to tensor form."""
-        return self.apply_inverse(x_hat.transpose((1, 2, 0)))
+        return self.apply_inverse(jnp.transpose(x_hat, (1, 2, 0)))
 
-    def star_prod(self, A: jax.Array, B: jax.Array) -> jax.Array:
+    def star_prod(self, A: ArrayLike, B: ArrayLike) -> jax.Array:
         """Compute the t-product induced by this transform."""
         return self.from_slices(self.to_slices(A) @ self.to_slices(B))
-
-    def debug_assert_last_axis_preserved(self, x: jax.Array) -> None:
-        """Assert that the transform preserves the input tensor shape."""
-        x_hat = self.apply(x)
-        assert x_hat.shape == x.shape, "Transform must preserve tensor shape."
-
-    def debug_assert_inverse_shape(self, x: jax.Array) -> None:
-        """Assert that the inverse transform preserves the input tensor shape."""
-        x_roundtrip = self.apply_inverse(self.apply(x))
-        assert x_roundtrip.shape == x.shape, "Inverse transform must preserve tensor shape."
-
-    def debug_assert_square_slices(self, A: jax.Array) -> None:
-        """Assert that transformed frontal slices are square matrices."""
-        assert A.ndim == 3, "Tensor operations require a third-order tensor."
-        assert A.shape[0] == A.shape[1], "Operation requires square frontal slices."
-
-    def debug_assert_star_prod_args(self, A: jax.Array, B: jax.Array) -> None:
-        """Assert shape compatibility for the tensor product."""
-        assert A.ndim == 3 and B.ndim == 3, "Tensor product requires third-order tensors."
-        assert A.shape[1] == B.shape[0], "Inner tensor-product dimensions must match."
-        assert A.shape[2] == B.shape[2], "Transform-axis sizes must match."
 
 
 @jax.tree_util.register_pytree_node_class
@@ -86,7 +68,7 @@ class MatrixTransform(LinearTransform):
         object.__setattr__(self, "condition_threshold", condition_threshold)
         object.__setattr__(self, "condition_number", cond)
 
-    def apply(self, x: jax.Array) -> jax.Array:
+    def apply(self, x: ArrayLike) -> jax.Array:
         return jnp.tensordot(x, self.M_T, ([2], [0]))
 
     def apply_inverse(self, x: jax.Array) -> jax.Array:
@@ -132,7 +114,7 @@ class FFTTransform(LinearTransform):
         return cls()
 
 
-def star_prod(A: jax.Array, B: jax.Array, L: LinearTransform) -> jax.Array:
+def star_prod(A: ArrayLike, B: ArrayLike, L: LinearTransform) -> jax.Array:
     """Compute the t-product of third-order tensors under a chosen basis.
 
     Args:

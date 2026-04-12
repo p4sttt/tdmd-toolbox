@@ -1,164 +1,177 @@
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import jax.scipy as jsc
+import jax.scipy as jsp
+from jax.typing import ArrayLike
 
 from tdmd.core.tensor_product import LinearTransform
 
 
-def _validate_tensor_svd_inputs(A: jax.Array, L: LinearTransform) -> None:
+class TSVDResult(NamedTuple):
+    U: jax.Array
+    S: jax.Array
+    Vh: jax.Array
+
+
+class TSchurResult(NamedTuple):
+    T: jax.Array
+    W: jax.Array
+
+
+def _validate_tensor_input(A: ArrayLike, L: LinearTransform, *, require_square_slices: bool) -> jax.Array:
+    A = jnp.asarray(A)
     if A.ndim != 3:
-        raise ValueError(f"Expected a third-order tensor with shape (m, n, k); got ndim={A.ndim}.")
-    if min(A.shape) == 0:
-        raise ValueError(f"Tensor dimensions must be positive; got shape {A.shape}.")
-    if __debug__:
-        L.debug_assert_last_axis_preserved(A)
-        L.debug_assert_inverse_shape(A)
+        raise ValueError(f"Expected a third-order tensor with shape (m, n, k); got shape {A.shape}.")
 
-
-def _validate_truncation_policy(
-    rank: int | None, energy_threshold: float | None, svd_threshold: float
-) -> None:
-    if rank is not None and rank < 1:
-        raise ValueError(f"rank must be positive; got {rank}.")
-    if energy_threshold is not None and not (0.0 < energy_threshold <= 1.0):
+    transform_size = getattr(L, "M", None)
+    if transform_size is not None and transform_size.shape[0] != A.shape[2]:
         raise ValueError(
-            f"energy_threshold must be in the interval (0, 1]; got {energy_threshold}."
+            "Input tensor third-axis length must match the transform size; "
+            f"got tensor shape {A.shape} and transform size {transform_size.shape[0]}."
         )
-    if svd_threshold < 0.0:
-        raise ValueError(f"svd_threshold must be non-negative; got {svd_threshold}.")
 
-
-def _resolve_rank_from_spectrum(
-    spectrum: jax.Array,
-    rank: int | None = None,
-    energy_threshold: float | None = None,
-    svd_threshold: float = 0.0,
-) -> int:
-    max_rank = int(spectrum.shape[0])
-    resolved_rank = max_rank if rank is None else min(rank, max_rank)
-
-    if energy_threshold is not None:
-        energies = jnp.square(jnp.abs(spectrum))
-        total_energy = float(jax.device_get(jnp.sum(energies)))
-        if total_energy <= 0.0:
-            raise ValueError(
-                "Cannot resolve truncation rank because the singular spectrum has zero energy."
-            )
-        cumulative_energy = jax.device_get(jnp.cumsum(energies) / total_energy)
-        energy_rank = int(jnp.searchsorted(cumulative_energy, energy_threshold, side="left")) + 1
-        resolved_rank = min(resolved_rank, energy_rank)
-
-    if svd_threshold > 0.0:
-        tol_rank = int(jax.device_get(jnp.count_nonzero(jnp.abs(spectrum) > svd_threshold)))
-        resolved_rank = min(resolved_rank, tol_rank)
-
-    if resolved_rank < 1:
+    if require_square_slices and A.shape[0] != A.shape[1]:
         raise ValueError(
-            "Truncation policy removed all singular values; lower svd_threshold or energy_threshold."
+            "Tensor Schur decomposition requires square frontal slices; "
+            f"got shape {A.shape}."
         )
-    return resolved_rank
+
+    return A
+
+
+def _validate_threshold(threshold: float) -> float:
+    threshold = float(threshold)
+    if threshold < 0 or not jnp.isfinite(threshold):
+        raise ValueError(f"Expected a finite non-negative threshold; got {threshold}.")
+    return threshold
 
 
 @jax.jit
-def _tsvd_slices_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Array]:
-    A_hat = L.to_slices(A)
-    return jsc.linalg.svd(A_hat, full_matrices=False)
+def _tsvd_impl(A: ArrayLike, L: LinearTransform) -> TSVDResult:
+    A_hat = L.to_slices(A)  # (k, m, n)
+    # U_hat: (k, m, rmax), s: (k, rmax), Vh_hat: (k, rmax, n), where rmax = min(m, n)
+    U_hat, s, Vh_hat = jnp.linalg.svd(A_hat, full_matrices=False)
+
+    rank = s.shape[1]
+    eye = jnp.eye(rank, dtype=s.dtype)[None, :, :]
+    S_hat = s[:, :, None] * eye
+
+    return TSVDResult(U_hat, S_hat, Vh_hat)
 
 
-@jax.jit
-def _tsvd_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Array]:
-    U_hat, Sigma, Vh_hat = _tsvd_slices_impl(A, L)
-    rank = Sigma.shape[1]
-    eye = jnp.eye(rank, dtype=Sigma.dtype)[None, :, :]
-    S_hat = Sigma[:, :, None] * eye
-    return L.from_slices(U_hat), L.from_slices(S_hat), L.from_slices(Vh_hat)
-
-
-@partial(jax.jit, static_argnames=("rank",))
+@partial(jax.jit, static_argnames=("threshold", "singular_value_threshold"))
 def _truncated_tsvd_impl(
-    A: jax.Array, L: LinearTransform, rank: int
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    U, S, Vh = _tsvd_impl(A, L)
-    return U[:, :rank, :], S[:rank, :rank, :], Vh[:rank, :, :]
+    A: jax.Array,
+    L: LinearTransform,
+    threshold: float,
+    singular_value_threshold: float = 0.0,
+) -> TSVDResult:
+    A_hat = L.to_slices(A)  # (k, m, n)
+    # U_hat: (k, m, rmax), s: (k, rmax), Vh_hat: (k, rmax, n), where rmax = min(m, n)
+    U_hat, s, Vh_hat = jnp.linalg.svd(A_hat, full_matrices=False)
+
+    tube_spectrum = jnp.linalg.norm(s, axis=0)  # (rmax,)
+    keep_tubes = tube_spectrum > threshold
+    keep_singular_values = s > singular_value_threshold
+
+    s = jnp.where(keep_tubes[None, :], s, 0.0)
+    U_hat = jnp.where(keep_tubes[None, None, :], U_hat, 0.0)
+    Vh_hat = jnp.where(keep_tubes[None, :, None], Vh_hat, 0.0)
+    s = jnp.where(keep_singular_values, s, 0.0)
+
+    rmax = s.shape[1]
+    eye = jnp.eye(rmax, dtype=s.dtype)[None, :, :]
+    S_hat = s[:, :, None] * eye
+
+    return TSVDResult(U_hat, S_hat, Vh_hat)
 
 
-def tsvd(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Compute the tensor SVD of ``A`` under the transform ``L``.
+@jax.jit
+def _tschur_impl(A: ArrayLike, L: LinearTransform) -> TSchurResult:
+    A_hat = L.to_slices(A)
+    T_hat, W_hat = jsp.linalg.schur(A_hat)
+    return TSchurResult(T_hat, W_hat)
+
+
+def tsvd(A: jax.Array, L: LinearTransform) -> TSVDResult:
+    """Compute the tensor SVD of a third-order tensor under transform ``L``.
 
     Args:
-        A: Input tensor with the transform axis in the last dimension.
-        L: Linear transform defining the tensor product algebra.
+        A: Tensor with shape ``(m, n, k)``.
+        L: Linear transform defining the tensor product algebra along axis 2.
 
     Returns:
-        A tuple ``(U, S, Vh)`` such that ``A`` is factorized in the transform
-        domain, with ``S`` storing the singular tubes as diagonal frontal slices.
+        A tuple ``(U, S, Vh)`` in tensor form such that ``A = U * S * Vh``
+        under the t-product induced by ``L``.
+
+    Raises:
+        ValueError: If ``A`` is not third-order or is incompatible with ``L``.
     """
-    _validate_tensor_svd_inputs(A, L)
-    return _tsvd_impl(A, L)
-
-
-def tensor_singular_spectrum(A: jax.Array, L: LinearTransform) -> jax.Array:
-    """Return per-tube singular-value magnitudes used for truncation decisions."""
-    _validate_tensor_svd_inputs(A, L)
-    _, sing_vals, _ = _tsvd_slices_impl(A, L)
-    return jnp.linalg.norm(sing_vals, axis=0)
+    A = _validate_tensor_input(A, L, require_square_slices=False)
+    U_hat, S_hat, Vh_hat = _tsvd_impl(A, L)
+    return TSVDResult(
+        L.from_slices(U_hat),
+        L.from_slices(S_hat),
+        L.from_slices(Vh_hat),
+    )
 
 
 def truncated_tsvd(
     A: jax.Array,
     L: LinearTransform,
-    rank: int | None = None,
-    *,
-    energy_threshold: float | None = None,
-    svd_threshold: float = 0.0,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Compute a truncated tensor SVD of ``A`` under the transform ``L``."""
-    _validate_tensor_svd_inputs(A, L)
-    _validate_truncation_policy(rank, energy_threshold, svd_threshold)
-    spectrum = tensor_singular_spectrum(A, L)
-    resolved_rank = _resolve_rank_from_spectrum(
-        spectrum,
-        rank=rank,
-        energy_threshold=energy_threshold,
-        svd_threshold=svd_threshold,
-    )
-    return _truncated_tsvd_impl(A, L, resolved_rank)
-
-
-@jax.jit
-def _tschur_impl(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array]:
-    A_hat = L.to_slices(A)
-    T_hat, Z_hat = jsc.linalg.schur(A_hat)
-    return L.from_slices(T_hat), L.from_slices(Z_hat)
-
-
-def _validate_tensor_schur_inputs(A: jax.Array, L: LinearTransform) -> None:
-    if A.ndim != 3:
-        raise ValueError(f"Expected a third-order tensor with shape (m, m, k); got ndim={A.ndim}.")
-    if min(A.shape) == 0:
-        raise ValueError(f"Tensor dimensions must be positive; got shape {A.shape}.")
-    if A.shape[0] != A.shape[1]:
-        raise ValueError(
-            f"Tensor Schur decomposition requires square frontal slices; got shape {A.shape}."
-        )
-    if __debug__:
-        L.debug_assert_last_axis_preserved(A)
-        L.debug_assert_inverse_shape(A)
-        L.debug_assert_square_slices(A)
-
-
-def tschur(A: jax.Array, L: LinearTransform) -> tuple[jax.Array, jax.Array]:
-    """Compute the tensor Schur decomposition of ``A`` under the transform ``L``.
+    threshold: float = 0,
+    singular_value_threshold: float = 0,
+) -> TSVDResult:
+    """Compute a thresholded tensor SVD under transform ``L``.
 
     Args:
-        A: Input tensor with square frontal slices and transform axis last.
-        L: Linear transform defining the tensor product algebra.
+        A: Tensor with shape ``(m, n, k)``.
+        L: Linear transform defining the tensor product algebra along axis 2.
+        threshold: Absolute cutoff applied to the tube spectrum. Components
+            whose tube norm is not greater than ``threshold`` are discarded.
+        singular_value_threshold: Absolute cutoff applied to each transformed
+            singular value after tube truncation. Singular values not greater
+            than this threshold are set to zero slice-wise.
 
     Returns:
-        A tuple ``(T, Z)`` where the transformed frontal slices satisfy the
-        slice-wise Schur factorization ``A_hat = Z_hat @ T_hat @ Z_hat^H``.
+        A tuple ``(U, S, Vh)`` with discarded tensor singular components set
+        to zero in the transform domain.
+
+    Raises:
+        ValueError: If ``A`` is not third-order, is incompatible with ``L``,
+            or if a threshold is negative or non-finite.
     """
-    _validate_tensor_schur_inputs(A, L)
-    return _tschur_impl(A, L)
+    A = _validate_tensor_input(A, L, require_square_slices=False)
+    threshold = _validate_threshold(threshold)
+    singular_value_threshold = _validate_threshold(singular_value_threshold)
+    U_hat, S_hat, Vh_hat = _truncated_tsvd_impl(A, L, threshold, singular_value_threshold)
+    return TSVDResult(
+        L.from_slices(U_hat),
+        L.from_slices(S_hat),
+        L.from_slices(Vh_hat),
+    )
+
+
+def tschur(A: ArrayLike, L: LinearTransform) -> TSchurResult:
+    """Compute the tensor Schur decomposition under transform ``L``.
+
+    Args:
+        A: Tensor with shape ``(m, m, k)``.
+        L: Linear transform defining the tensor product algebra along axis 2.
+
+    Returns:
+        A tuple ``(T, W)`` in tensor form, where ``T`` is upper triangular in
+        the transform domain and ``W`` contains the corresponding unitary basis.
+
+    Raises:
+        ValueError: If ``A`` is not third-order, has non-square frontal slices,
+            or is incompatible with ``L``.
+    """
+    A = _validate_tensor_input(A, L, require_square_slices=True)
+    T_hat, W_hat = _tschur_impl(A, L)
+    return TSchurResult(
+        L.from_slices(T_hat),
+        L.from_slices(W_hat),
+    )

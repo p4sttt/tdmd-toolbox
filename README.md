@@ -29,4 +29,9 @@ They have the following functionality
 
 ## Examples
 
-<!-- TODO: describe numerical experiments in /examples -->
+The `examples/` directory contains two numerical experiments on a synthetic plasma-like dataset generated on a `96 x 96 x 128` space-time grid:
+
+- `examples/dmd-plasm.ipynb` applies matrix DMD to shifted snapshot matrices built from the first 96 frames and predicts frame 128 from a rank-20 model.
+- `examples/tdmd-plasm.ipynb` applies tensor DMD with an `FFTTransform` to the same sequence, using tensor embeddings of the training frames and the same rank/energy truncation settings.
+
+Both notebooks report relative reconstruction error for the predicted frame and plot the initial state, ground-truth target frame, model prediction, and residual.

@@ -5,8 +5,8 @@ from tdmd.core import (
     star_prod,
     truncated_tsvd,
     tsvd,
-    dmd,
     tdmd,
+    tdmdii,
 )
 
 __all__ = [
@@ -16,6 +16,6 @@ __all__ = [
     "star_prod",
     "tsvd",
     "truncated_tsvd",
-    "dmd",
     "tdmd",
+    "tdmdii",
 ]
