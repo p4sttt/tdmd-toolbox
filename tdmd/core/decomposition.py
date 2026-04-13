@@ -15,15 +15,26 @@ class TSVDResult(NamedTuple):
     Vh: jax.Array
 
 
+class TSVDIIResult(NamedTuple):
+    U: jax.Array
+    S: jax.Array
+    Vh: jax.Array
+    multirank: jax.Array
+
+
 class TSchurResult(NamedTuple):
     T: jax.Array
     W: jax.Array
 
 
-def _validate_tensor_input(A: ArrayLike, L: LinearTransform, *, require_square_slices: bool) -> jax.Array:
+def _validate_tensor_input(
+    A: ArrayLike, L: LinearTransform, *, require_square_slices: bool
+) -> jax.Array:
     A = jnp.asarray(A)
     if A.ndim != 3:
-        raise ValueError(f"Expected a third-order tensor with shape (m, n, k); got shape {A.shape}.")
+        raise ValueError(
+            f"Expected a third-order tensor with shape (m, n, k); got shape {A.shape}."
+        )
 
     transform_size = getattr(L, "M", None)
     if transform_size is not None and transform_size.shape[0] != A.shape[2]:
@@ -34,8 +45,7 @@ def _validate_tensor_input(A: ArrayLike, L: LinearTransform, *, require_square_s
 
     if require_square_slices and A.shape[0] != A.shape[1]:
         raise ValueError(
-            "Tensor Schur decomposition requires square frontal slices; "
-            f"got shape {A.shape}."
+            "Tensor Schur decomposition requires square frontal slices; " f"got shape {A.shape}."
         )
 
     return A
@@ -86,6 +96,30 @@ def _truncated_tsvd_impl(
     S_hat = s[:, :, None] * eye
 
     return TSVDResult(U_hat, S_hat, Vh_hat)
+
+
+@partial(jax.jit, static_argnames=("gamma",))
+def _truncate_tsvdii_impl(
+    A_hat: jax.Array, gamma: float
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    U_hat, singular_values, Vh_hat = jnp.linalg.svd(A_hat, full_matrices=False)
+
+    energies = (jnp.abs(singular_values) ** 2).reshape(-1)
+    sorted_energies = jnp.sort(energies)[::-1]
+    cumulative_energy = jnp.cumsum(sorted_energies)
+    keep_count = jnp.searchsorted(cumulative_energy, gamma * cumulative_energy[-1], side="left") + 1
+    cutoff = sorted_energies[keep_count - 1]
+
+    keep = (jnp.abs(singular_values) ** 2) >= cutoff
+    masked_singular_values = jnp.where(keep, singular_values, 0)
+    multirank = jnp.sum(keep, axis=1)
+
+    return TSVDIIResult(
+        U_hat,
+        masked_singular_values,
+        Vh_hat,
+        multirank,
+    )
 
 
 @jax.jit
@@ -151,6 +185,31 @@ def truncated_tsvd(
         L.from_slices(U_hat),
         L.from_slices(S_hat),
         L.from_slices(Vh_hat),
+    )
+
+
+def truncated_tsvdii(
+    A: jax.Array, L: LinearTransform, gamma: float
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Compute the truncated tensor SVD under transform ``L``.
+
+    Args:
+        A: Tensor with shape ``(m, n, k)``
+        L: Linear transform defining the tensor product algebra along axis 2.
+        gamma: Truncation parameter.
+
+    Returns:
+        A tuple ``(U, S, Vh)`` with discarded tensor singular components set
+        to zero in the transform domain.
+    """
+    A = _validate_tensor_input(A, L, require_square_slices=False)
+    A_hat = L.to_slices(A)
+    U_hat, S_hat, Vh_hat, multirank = _truncate_tsvdii_impl(A_hat, gamma)
+    return TSVDIIResult(
+        L.from_slices(U_hat),
+        L.from_slices(S_hat),
+        L.from_slices(Vh_hat),
+        multirank,
     )
 
 

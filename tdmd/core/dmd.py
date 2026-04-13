@@ -8,7 +8,11 @@ from jax.typing import ArrayLike
 
 
 from tdmd.core.tensor_product import LinearTransform
-from tdmd.core.decomposition import _truncated_tsvd_impl, _validate_threshold
+from tdmd.core.decomposition import (
+    _truncated_tsvd_impl,
+    _validate_threshold,
+    _truncate_tsvdii_impl,
+)
 
 
 class TDMDResult(NamedTuple):
@@ -31,22 +35,6 @@ def _invert_transformed_singular_values(S_hat: jax.Array, signvals_threshold: fl
 
     eye = jnp.eye(S_hat.shape[1], dtype=S_hat.dtype)[None, :, :]
     return singular_values_inv[:, :, None] * eye
-
-
-def _truncate_tsvdii_impl(A_hat: jax.Array, gamma: float) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    U_hat, singular_values, Vh_hat = jnp.linalg.svd(A_hat, full_matrices=False)
-
-    energies = (jnp.abs(singular_values) ** 2).reshape(-1)
-    sorted_energies = jnp.sort(energies)[::-1]
-    cumulative_energy = jnp.cumsum(sorted_energies)
-    keep_count = jnp.searchsorted(cumulative_energy, gamma * cumulative_energy[-1], side="left") + 1
-    cutoff = sorted_energies[keep_count - 1]
-
-    keep = (jnp.abs(singular_values) ** 2) >= cutoff
-    masked_singular_values = jnp.where(keep, singular_values, 0)
-    multirank = jnp.sum(keep, axis=1)
-
-    return U_hat, masked_singular_values, Vh_hat, multirank
 
 
 def _compact_face_factors(
