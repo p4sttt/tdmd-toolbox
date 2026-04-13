@@ -27,10 +27,6 @@ def make_plasma(nx: int = 100, ny: int = 100, nt: int = 100):
     return Z, t
 
 
-def split_shifted_tensor(sequence):
-    return sequence[:, :, :-1], sequence[:, :, 1:]
-
-
 def relative_error(target, approx):
     return float(jnp.linalg.norm(target - approx) / jnp.linalg.norm(target))
 
@@ -43,14 +39,29 @@ def draw_frame(ax, frame, title, cmap="magma"):
     return image
 
 
-def apply_tdmd_operator(window, modes, schur_tensor, transform):
+def reconstruct_tdmdii_snapshot(modes, schur_tensor, amplitudes, step: int, transform):
     modes_hat = transform.to_slices(modes)
     schur_hat = transform.to_slices(schur_tensor)
-    window_hat = transform.to_slices(window)
+    amplitudes_hat = transform.to_slices(amplitudes)
 
-    def apply_slice(phi, t, x):
-        phi_pinv = jnp.linalg.pinv(phi)
-        return phi @ t @ phi_pinv @ x
+    def predict_slice(phi, t, g):
+        return phi @ jnp.linalg.matrix_power(t, step) @ g
 
-    next_hat = jax.vmap(apply_slice)(modes_hat, schur_hat, window_hat)
-    return jnp.real(transform.from_slices(next_hat))
+    snapshot_hat = jax.vmap(predict_slice)(modes_hat, schur_hat, amplitudes_hat)
+    return jnp.real(transform.from_slices(snapshot_hat))[:, 0, :]
+
+
+def reconstruct_tdmdii_sequence(modes, schur_tensor, amplitudes, max_step: int, transform):
+    return jnp.stack(
+        [
+            reconstruct_tdmdii_snapshot(
+                modes,
+                schur_tensor,
+                amplitudes,
+                step,
+                transform,
+            )
+            for step in range(max_step + 1)
+        ],
+        axis=0,
+    )
