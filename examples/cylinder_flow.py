@@ -21,16 +21,14 @@ CYLINDER_SNAPSHOT_COUNT = 150
 
 
 @dataclass(frozen=True)
-class DMDExperimentResult:
-    rank: int
+class DMDResult:
     reconstructed_states: np.ndarray
     state_errors: np.ndarray
     storage_cost: int
 
 
 @dataclass(frozen=True)
-class TDMDIIExperimentResult:
-    gamma: float
+class TDMDIIResult:
     reconstructed_tensor: np.ndarray
     reconstructed_states: np.ndarray
     state_errors: np.ndarray
@@ -38,7 +36,7 @@ class TDMDIIExperimentResult:
     multirank: np.ndarray
 
 
-def ensure_cylinder_dataset(path: Path) -> Path:
+def ensure_dataset(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         urlretrieve(CYLINDER_DATA_URL, path)
@@ -51,7 +49,7 @@ def load_cylinder_flow(
     snapshot_count: int = CYLINDER_SNAPSHOT_COUNT,
     grid_shape: tuple[int, int] = CYLINDER_GRID_SHAPE,
 ) -> tuple[np.ndarray, np.ndarray]:
-    path = ensure_cylinder_dataset(path)
+    path = ensure_dataset(path)
     states = sio.loadmat(path)["VORTALL"][:, :snapshot_count]
     nx, ny = grid_shape
     tensor = states.reshape(nx, ny, snapshot_count, order="F").transpose(0, 2, 1)
@@ -71,14 +69,15 @@ def relative_error(target: np.ndarray, approx: np.ndarray) -> float:
 
 def statewise_relative_errors(states: np.ndarray, reconstructed_states: np.ndarray) -> np.ndarray:
     return np.array(
-        [
-            relative_error(states[:, idx], reconstructed_states[:, idx])
-            for idx in range(states.shape[1])
-        ]
+        [relative_error(states[:, idx], reconstructed_states[:, idx]) for idx in range(states.shape[1])]
     )
 
 
-def reconstruct_dmd(states: np.ndarray, rank: int) -> DMDExperimentResult:
+def flatten_tensor_states(tensor: np.ndarray) -> np.ndarray:
+    return tensor.transpose(0, 2, 1).reshape(tensor.shape[0] * tensor.shape[2], tensor.shape[1], order="F")
+
+
+def reconstruct_dmd(states: np.ndarray, rank: int) -> DMDResult:
     X = states[:, :-1]
     Y = states[:, 1:]
 
@@ -99,16 +98,15 @@ def reconstruct_dmd(states: np.ndarray, rank: int) -> DMDExperimentResult:
     reconstructed_states = reconstructed_states.real
     state_errors = statewise_relative_errors(states, reconstructed_states)
     storage_cost = states.shape[0] * rank + rank * (rank + 1) // 2
-    return DMDExperimentResult(rank, reconstructed_states, state_errors, storage_cost)
+    return DMDResult(reconstructed_states, state_errors, storage_cost)
 
 
 def dct_matrix(size: int) -> np.ndarray:
     return dct(np.eye(size), type=2, norm="ortho", axis=0)
 
 
-def reconstruct_tdmdii_experiment(tensor: np.ndarray, gamma: float) -> TDMDIIExperimentResult:
-    M = dct_matrix(tensor.shape[2])
-    transform = MatrixTransform(jnp.asarray(M))
+def reconstruct_tdmdii(tensor: np.ndarray, gamma: float) -> TDMDIIResult:
+    transform = MatrixTransform(jnp.asarray(dct_matrix(tensor.shape[2])))
 
     X = jnp.asarray(tensor[:, :-1, :])
     Y = jnp.asarray(tensor[:, 1:, :])
@@ -119,9 +117,7 @@ def reconstruct_tdmdii_experiment(tensor: np.ndarray, gamma: float) -> TDMDIIExp
     amplitudes_hat = np.asarray(transform.to_slices(amplitudes))
     multirank = np.asarray(multirank)
 
-    reconstructed_hat = np.zeros(
-        (tensor.shape[2], tensor.shape[0], tensor.shape[1]), dtype=np.complex128
-    )
+    reconstructed_hat = np.zeros((tensor.shape[2], tensor.shape[0], tensor.shape[1]), dtype=np.complex128)
     for step in range(tensor.shape[1]):
         for face, k_face in enumerate(multirank):
             k_face = int(k_face)
@@ -134,20 +130,15 @@ def reconstruct_tdmdii_experiment(tensor: np.ndarray, gamma: float) -> TDMDIIExp
             )
 
     reconstructed_tensor = np.asarray(transform.from_slices(jnp.asarray(reconstructed_hat))).real
-    reconstructed_states = reconstructed_tensor.transpose(0, 2, 1).reshape(
-        tensor.shape[0] * tensor.shape[2], tensor.shape[1], order="F"
-    )
-    original_states = tensor.transpose(0, 2, 1).reshape(
-        tensor.shape[0] * tensor.shape[2], tensor.shape[1], order="F"
-    )
+    reconstructed_states = flatten_tensor_states(reconstructed_tensor)
+    original_states = flatten_tensor_states(tensor)
 
     state_errors = statewise_relative_errors(original_states, reconstructed_states)
     storage_cost = int(
         tensor.shape[0] * multirank.sum()
         + sum(int(k_face * (k_face + 1) // 2 + k_face) for k_face in multirank)
     )
-    return TDMDIIExperimentResult(
-        gamma,
+    return TDMDIIResult(
         reconstructed_tensor,
         reconstructed_states,
         state_errors,
