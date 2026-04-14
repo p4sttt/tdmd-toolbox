@@ -109,16 +109,14 @@ next_snapshot = model.predict_next()
 
 ## Examples
 
-The `examples/` directory contains notebooks and small helper modules for three
-comparison settings.
+The `examples/` directory contains notebooks for three comparison settings.
 
 ### Plasma
 
 - `examples/dmd-plasma.ipynb`
 - `examples/tdmd-plasma.ipynb`
-- `examples/plasma_flow.py`
 
-These notebooks compare classical matrix DMD against `tdmdii` on a synthetic
+These notebooks compare classical matrix DMD against `TDMDII` on a synthetic
 plasma-like space-time field. Both notebooks evaluate reconstruction error over
 multiple forecasted snapshots and plot error growth across the prediction
 horizon.
@@ -127,20 +125,18 @@ horizon.
 
 - `examples/dmd-cylinder.ipynb`
 - `examples/tdmd-cylinder.ipynb`
-- `examples/cylinder_flow.py`
 
-These notebooks compare matrix DMD and `tdmdii` on the cylinder wake dataset
+These notebooks compare matrix DMD and `TDMDII` on the cylinder wake dataset
 from the Dynamics Lab data repository. The TDMDII setup uses a DCT-based
-`MatrixTransform` and reproduces the article-style comparison where tensor
-structure is beneficial.
+transform and reproduces the article-style comparison where tensor structure is
+beneficial.
 
 ### Temporal Graphs
 
 - `examples/dmd-temporal-graph.ipynb`
 - `examples/tdmd-temporal-graph.ipynb`
-- `examples/temporal_graphs.py`
 
-These notebooks compare matrix DMD and `tdmdii` on temporal graph snapshots
+These notebooks compare matrix DMD and `TDMDII` on temporal graph snapshots
 constructed from the Stanford SNAP `email-Eu-core-temporal-Dept3` dataset.
 
 ### Example data downloads
@@ -162,7 +158,7 @@ Run the test suite with:
 
 At the time of this README update, the repository test suite passes with:
 
-- `18 passed`
+- `22 passed`
 
 ## Project Structure
 
