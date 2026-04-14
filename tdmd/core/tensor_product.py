@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 from jax.typing import ArrayLike
-from matplotlib.pylab import norm
 
 
 class LinearTransform(ABC):
@@ -81,20 +80,17 @@ class FFTTransform(LinearTransform):
         return jnp.fft.ifft(x, axis=-1)
 
 
-@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class DCTTransform(LinearTransform):
     """DCT-based transform on the last axis."""
 
-    norm: str | None = "ortho"
-
     def apply(self, x: ArrayLike) -> jax.Array:
         x = jnp.asarray(x)
-        return jsp.fft.dct(x, axis=-1, norm=self.norm)
+        return jsp.fft.dct(x, axis=-1, norm="ortho")
 
     def apply_inverse(self, x: ArrayLike) -> jax.Array:
         x = jnp.asarray(x)
-        return jsp.fft.idct(x, axis=-1, norm=self.norm)
+        return jsp.fft.idct(x, axis=-1, norm="ortho")
 
 
 def star_prod(A: ArrayLike, B: ArrayLike, L: LinearTransform) -> jax.Array:
