@@ -80,6 +80,7 @@ class FFTTransform(LinearTransform):
         return jnp.fft.ifft(x, axis=-1)
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class DCTTransform(LinearTransform):
     """DCT-based transform on the last axis."""
