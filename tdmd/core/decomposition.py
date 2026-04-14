@@ -99,9 +99,7 @@ def _truncated_tsvd_impl(
 
 
 @partial(jax.jit, static_argnames=("gamma",))
-def _truncate_tsvdii_impl(
-    A_hat: jax.Array, gamma: float
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+def _truncate_tsvdii_impl(A_hat: jax.Array, gamma: float) -> TSVDIIResult:
     U_hat, singular_values, Vh_hat = jnp.linalg.svd(A_hat, full_matrices=False)
 
     energies = (jnp.abs(singular_values) ** 2).reshape(-1)
@@ -188,9 +186,7 @@ def truncated_tsvd(
     )
 
 
-def truncated_tsvdii(
-    A: jax.Array, L: LinearTransform, gamma: float
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+def truncated_tsvdii(A: jax.Array, L: LinearTransform, gamma: float) -> TSVDIIResult:
     """Compute the truncated tensor SVD under transform ``L``.
 
     Args:
