@@ -5,8 +5,8 @@ under transform-induced tensor algebras.
 
 The package currently focuses on:
 
-- tensor DMD (`tdmd`)
-- multirank TDMDII (`tdmdii`) inspired by the `star_M`-product formulation
+- tensor DMD (`TDMD`)
+- multirank TDMDII (`TDMDII`) inspired by the `star_M`-product formulation
 - configurable transform bases through `FFTTransform` and `MatrixTransform`
 
 Classical matrix DMD is not part of the library API. It is used only inside the
@@ -31,8 +31,8 @@ Public exports from `tdmd`:
 
 - `FFTTransform`
 - `MatrixTransform`
-- `tdmd`
-- `tdmdii`
+- `TDMD`
+- `TDMDII`
 
 ### Transforms
 
@@ -50,13 +50,12 @@ than top-level library entry points.
 
 ### Tensor DMD
 
-- `tdmd(X, Y, L, svd_threshold=..., signvals_threshold=...)` computes tensor DMD
-  modes and a tensor Schur operator for the reduced dynamics.
-- `tdmdii(X, Y, L, gamma=..., signvals_threshold=...)` computes the multirank
-  TDMDII variant and additionally returns initial amplitudes and the retained
-  face-wise multirank.
+- `TDMD(transform, ...)` provides a model-style `fit`, `predict_next()`,
+  `predict_step(step)`, and `forecast(horizon)` interface for tensor DMD.
+- `TDMDII(transform, ...)` provides the same model-style API for the multirank
+  TDMDII variant and additionally exposes `multirank`.
 
-`tdmdii` is the article-style multirank variant used in the cylinder and graph
+`TDMDII` is the article-style multirank variant used in the cylinder and graph
 examples.
 
 ## Quick Start
@@ -64,19 +63,22 @@ examples.
 ```python
 import jax.numpy as jnp
 
-from tdmd import FFTTransform, tdmd
+from tdmd import FFTTransform, TDMD
 
 L = FFTTransform()
-X = jnp.ones((8, 15, 4))
-Y = X
+snapshots = jnp.ones((8, 16, 4))
 
-modes, schur_tensor = tdmd(
-    X,
-    Y,
+model = TDMD(
     L,
     svd_threshold=0.0,
     signvals_threshold=1.0e-8,
 )
+model.fit(snapshots)
+
+modes = model.modes
+schur_tensor = model.schur_tensor
+next_snapshot = model.predict_next()
+step_5_snapshot = model.predict_step(5)
 ```
 
 For the multirank TDMDII variant:
@@ -84,21 +86,25 @@ For the multirank TDMDII variant:
 ```python
 import jax.numpy as jnp
 
-from tdmd import MatrixTransform, tdmdii
+from tdmd import MatrixTransform, TDMDII
 
 M = jnp.eye(6)
 L = MatrixTransform(M)
 
-X = jnp.ones((10, 20, 6))
-Y = X
+snapshots = jnp.ones((10, 21, 6))
 
-modes, schur_tensor, amplitudes, multirank = tdmdii(
-    X,
-    Y,
+model = TDMDII(
     L,
     gamma=0.999,
     signvals_threshold=1.0e-8,
 )
+model.fit(snapshots)
+
+modes = model.modes
+schur_tensor = model.schur_tensor
+amplitudes = model.amplitudes
+multirank = model.multirank
+next_snapshot = model.predict_next()
 ```
 
 ## Examples

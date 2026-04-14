@@ -1,9 +1,10 @@
-from tdmd.core.dmd import tdmd, tdmdii
-from tdmd.core.tensor_product import FFTTransform, MatrixTransform
+from tdmd.core.dmd import TDMD, TDMDII
+from tdmd.core.tensor_product import MatrixTransform, FFTTransform, DCTTransform
 
 __all__ = [
-    "FFTTransform",
     "MatrixTransform",
-    "tdmd",
-    "tdmdii",
+    "FFTTransform",
+    "DCTTransform",
+    "TDMD",
+    "TDMDII",
 ]

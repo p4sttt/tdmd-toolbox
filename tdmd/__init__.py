@@ -1,8 +1,9 @@
-from tdmd.core import FFTTransform, MatrixTransform, tdmd, tdmdii
+from tdmd.core import MatrixTransform, FFTTransform, DCTTransform, TDMD, TDMDII
 
 __all__ = [
-    "FFTTransform",
     "MatrixTransform",
-    "tdmd",
-    "tdmdii",
+    "FFTTransform",
+    "DCTTransform",
+    "TDMD",
+    "TDMDII",
 ]

@@ -2,29 +2,28 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import warnings
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsp
 from jax.typing import ArrayLike
+from matplotlib.pylab import norm
 
 
 class LinearTransform(ABC):
     """Abstract interface for invertible linear transforms."""
 
     @abstractmethod
-    def apply(self, x):
-        """Apply the transform"""
+    def apply(self, x: ArrayLike) -> jax.Array:
         raise NotImplementedError
 
     @abstractmethod
-    def apply_inverse(self, x):
-        """Apply the inverse transform"""
+    def apply_inverse(self, x: ArrayLike) -> jax.Array:
         raise NotImplementedError
 
     def to_slices(self, x: ArrayLike) -> jax.Array:
         """Map a tensor to transformed frontal slices with shape ``(k, m, n)``."""
-        return self.apply(x).transpose((2, 0, 1))
+        return jnp.transpose(self.apply(x), (2, 0, 1))
 
     def from_slices(self, x_hat: ArrayLike) -> jax.Array:
         """Map transformed frontal slices with shape ``(k, m, n)`` back to tensor form."""
@@ -35,83 +34,67 @@ class LinearTransform(ABC):
         return self.from_slices(self.to_slices(A) @ self.to_slices(B))
 
 
-@jax.tree_util.register_pytree_node_class
-@dataclass(frozen=True, init=False)
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
 class MatrixTransform(LinearTransform):
     """Linear transform defined by an invertible matrix on the last axis."""
 
     M: jax.Array
-    M_T: jax.Array
-    condition_threshold: float | None
-    condition_number: float
 
-    def __init__(self, M: jax.Array, *, condition_threshold: float | None = 1.0e8) -> None:
+    @classmethod
+    def from_matrix(cls, M: ArrayLike, check: bool = True) -> MatrixTransform:
+        M = jnp.asarray(M)
+
         if M.ndim != 2 or M.shape[0] != M.shape[1]:
-            raise ValueError(f"MatrixTransform expects a square matrix; got shape {M.shape}.")
+            raise ValueError(f"Expected a square matrix; got shape {M.shape}.")
 
-        cond = float(jax.device_get(jnp.linalg.cond(M)))
-        if not jnp.isfinite(cond):
-            raise ValueError("MatrixTransform requires an invertible finite matrix.")
-        if condition_threshold is not None and cond > condition_threshold:
-            warnings.warn(
-                (
-                    "MatrixTransform matrix is ill-conditioned "
-                    f"(cond={cond:.3e} > {condition_threshold:.3e}); "
-                    "inverse applications may be numerically unstable."
-                ),
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        if check:
+            cond = jnp.linalg.cond(M)
+            if not jnp.isfinite(cond):
+                raise ValueError("Matrix must be invertible.")
 
-        object.__setattr__(self, "M", M)
-        object.__setattr__(self, "M_T", M.T)
-        object.__setattr__(self, "condition_threshold", condition_threshold)
-        object.__setattr__(self, "condition_number", cond)
+        return cls(M)
 
     def apply(self, x: ArrayLike) -> jax.Array:
-        return jnp.tensordot(x, self.M_T, ([2], [0]))
+        x = jnp.asarray(x)
+        return jnp.tensordot(x, self.M.T, ([2], [0]))
 
-    def apply_inverse(self, x: jax.Array) -> jax.Array:
+    def apply_inverse(self, x: ArrayLike) -> jax.Array:
+        x = jnp.asarray(x)
         x_shape = x.shape
-        x_flat = x.reshape((-1, x_shape[-1]))
+        x_flat = jnp.reshape(x, (-1, x_shape[-1]))
         solved = jnp.linalg.solve(self.M, x_flat.T).T
         return solved.reshape(x_shape)
 
-    def tree_flatten(self) -> tuple[tuple[jax.Array], tuple[float | None, float]]:
-        return (self.M,), (self.condition_threshold, self.condition_number)
 
-    @classmethod
-    def tree_unflatten(
-        cls, aux_data: tuple[float | None, float], children: tuple[jax.Array]
-    ) -> MatrixTransform:
-        condition_threshold, condition_number = aux_data
-        obj = cls.__new__(cls)
-        (M,) = children
-        object.__setattr__(obj, "M", M)
-        object.__setattr__(obj, "M_T", M.T)
-        object.__setattr__(obj, "condition_threshold", condition_threshold)
-        object.__setattr__(obj, "condition_number", condition_number)
-        return obj
-
-
-@jax.tree_util.register_pytree_node_class
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FFTTransform(LinearTransform):
     """FFT-based transform on the last axis."""
 
-    def apply(self, x: jax.Array) -> jax.Array:
+    def apply(self, x: ArrayLike) -> jax.Array:
+        x = jnp.asarray(x)
         return jnp.fft.fft(x, axis=-1)
 
-    def apply_inverse(self, x: jax.Array) -> jax.Array:
+    def apply_inverse(self, x: ArrayLike) -> jax.Array:
+        x = jnp.asarray(x)
         return jnp.fft.ifft(x, axis=-1)
 
-    def tree_flatten(self) -> tuple[tuple[()], None]:
-        return (), None
 
-    @classmethod
-    def tree_unflatten(cls, aux_data: None, children: tuple[()]) -> FFTTransform:
-        del aux_data, children
-        return cls()
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class DCTTransform(LinearTransform):
+    """DCT-based transform on the last axis."""
+
+    norm: str | None = "ortho"
+
+    def apply(self, x: ArrayLike) -> jax.Array:
+        x = jnp.asarray(x)
+        return jsp.fft.dct(x, axis=-1, norm=self.norm)
+
+    def apply_inverse(self, x: ArrayLike) -> jax.Array:
+        x = jnp.asarray(x)
+        return jsp.fft.idct(x, axis=-1, norm=self.norm)
 
 
 def star_prod(A: ArrayLike, B: ArrayLike, L: LinearTransform) -> jax.Array:

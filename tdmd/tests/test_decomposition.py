@@ -65,7 +65,7 @@ def test_truncated_tsvd_singular_value_threshold_effect():
     A = A.at[1, 1, 0].set(0.25)
     L = FFTTransform()
 
-    _, S, _ = truncated_tsvd(A, L, singular_value_threshold=0.5)
+    _, S, _ = truncated_tsvd(A, L, singvals_threshold=0.5)
     singular_values = jnp.diagonal(L.to_slices(S), axis1=1, axis2=2)
 
     assert jnp.allclose(singular_values, jnp.array([[2.0, 0.0]], dtype=singular_values.dtype))
@@ -105,7 +105,22 @@ def test_truncated_tsvd_rejects_invalid_singular_value_threshold():
     A = jnp.ones((4, 4, 2))
 
     with pytest.raises(ValueError, match="finite non-negative threshold"):
-        truncated_tsvd(A, FFTTransform(), singular_value_threshold=-1.0)
+        truncated_tsvd(A, FFTTransform(), singvals_threshold=-1.0)
+
+
+def test_truncated_tsvd_can_skip_threshold_validation():
+    A = jnp.ones((4, 4, 2))
+    U, S, Vh = truncated_tsvd(
+        A,
+        FFTTransform(),
+        threshold=-1.0,
+        singvals_threshold=-1.0,
+        check=False,
+    )
+
+    assert U.shape == (4, 4, 2)
+    assert S.shape == (4, 4, 2)
+    assert Vh.shape == (4, 4, 2)
 
 
 def test_tsvd_rejects_transform_axis_mismatch():

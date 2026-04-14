@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from functools import partial
 from typing import NamedTuple
 
@@ -6,13 +8,14 @@ import jax.numpy as jnp
 import jax.scipy as jsc
 from jax.typing import ArrayLike
 
-
-from tdmd.core.tensor_product import LinearTransform
 from tdmd.core.decomposition import (
-    _truncated_tsvd_impl,
-    _validate_threshold,
     _truncate_tsvdii_impl,
+    _truncated_tsvd_impl,
+    _validate_gamma,
+    _validate_tensor_input,
+    _validate_threshold,
 )
+from tdmd.core.tensor_product import LinearTransform
 
 
 class TDMDResult(NamedTuple):
@@ -25,6 +28,25 @@ class TDMDIIResult(NamedTuple):
     schur_tensor: jax.Array
     amplitudes: jax.Array
     multirank: jax.Array
+
+
+def _resolve_check(check: bool) -> bool:
+    if not isinstance(check, bool):
+        raise TypeError(f"Expected check to be a bool; got {type(check).__name__}.")
+    return check
+
+
+def _validate_tensor_pair_inputs(
+    X: ArrayLike, Y: ArrayLike, L: LinearTransform
+) -> tuple[jax.Array, jax.Array]:
+    X = _validate_tensor_input(X, L, require_square_slices=False)
+    Y = _validate_tensor_input(Y, L, require_square_slices=False)
+    if X.shape != Y.shape:
+        raise ValueError(
+            "Expected X and Y to have the same tensor shape; "
+            f"got X.shape={X.shape} and Y.shape={Y.shape}."
+        )
+    return X, Y
 
 
 def _invert_transformed_singular_values(S_hat: jax.Array, signvals_threshold: float) -> jax.Array:
@@ -55,6 +77,332 @@ def _compact_face_factors(
     return U_hat, S_hat, Vh_hat
 
 
+def _prepare_fit_tensors(
+    X: ArrayLike,
+    Y: ArrayLike | None,
+    L: LinearTransform,
+    *,
+    check: bool,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    if Y is None:
+        snapshots = (
+            _validate_tensor_input(X, L, require_square_slices=False) if check else jnp.asarray(X)
+        )
+        if check and snapshots.shape[1] < 2:
+            raise ValueError(
+                "Expected at least two snapshots along axis 1 when Y is omitted; "
+                f"got shape {snapshots.shape}."
+            )
+        return snapshots[:, :-1, :], snapshots[:, 1:, :], snapshots
+
+    X_fit, Y_fit = (
+        _validate_tensor_pair_inputs(X, Y, L) if check else (jnp.asarray(X), jnp.asarray(Y))
+    )
+    return X_fit, Y_fit, X_fit
+
+
+def _initial_amplitudes(modes: jax.Array, X0: jax.Array, L: LinearTransform) -> jax.Array:
+    modes_hat = L.to_slices(modes)
+    X0_hat = L.to_slices(X0)
+
+    def project_slice(phi, x0):
+        return jnp.linalg.pinv(phi) @ x0
+
+    amplitudes_hat = jax.vmap(project_slice)(modes_hat, X0_hat)
+    return L.from_slices(amplitudes_hat)
+
+
+def _forecast_tensor(
+    modes: jax.Array,
+    schur_tensor: jax.Array,
+    amplitudes: jax.Array,
+    horizon: int,
+    L: LinearTransform,
+) -> jax.Array:
+    modes_hat = L.to_slices(modes)
+    schur_hat = L.to_slices(schur_tensor)
+    amplitudes_hat = L.to_slices(amplitudes)
+
+    def predict_slice(phi, t, g, step):
+        return phi @ jnp.linalg.matrix_power(t, step) @ g
+
+    sequence_hat = []
+    for step in range(horizon):
+        sequence_hat.append(
+            jax.vmap(predict_slice, in_axes=(0, 0, 0, None))(
+                modes_hat,
+                schur_hat,
+                amplitudes_hat,
+                step,
+            )
+        )
+    return L.from_slices(jnp.concatenate(sequence_hat, axis=2))
+
+
+def _predict_snapshot(
+    modes: jax.Array,
+    schur_tensor: jax.Array,
+    amplitudes: jax.Array,
+    step: int,
+    L: LinearTransform,
+) -> jax.Array:
+    modes_hat = L.to_slices(modes)
+    schur_hat = L.to_slices(schur_tensor)
+    amplitudes_hat = L.to_slices(amplitudes)
+
+    def predict_slice(phi, t, g):
+        return phi @ jnp.linalg.matrix_power(t, step) @ g
+
+    snapshot_hat = jax.vmap(predict_slice)(modes_hat, schur_hat, amplitudes_hat)
+    return L.from_slices(snapshot_hat)[:, 0, :]
+
+
+def _schur_eigenvalues(schur_tensor: jax.Array, L: LinearTransform) -> jax.Array:
+    return jnp.diagonal(L.to_slices(schur_tensor), axis1=1, axis2=2)
+
+
+class TDMD:
+    """pyDMD-style wrapper for tensor DMD."""
+
+    def __init__(
+        self,
+        transform: LinearTransform,
+        *,
+        svd_threshold: float = 0.0,
+        signvals_threshold: float = 0.0,
+        check: bool = True,
+    ) -> None:
+        self.transform = transform
+        self.svd_threshold = svd_threshold
+        self.signvals_threshold = signvals_threshold
+        self.check = _resolve_check(check)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._snapshots: jax.Array | None = None
+        self._modes: jax.Array | None = None
+        self._schur_tensor: jax.Array | None = None
+        self._amplitudes: jax.Array | None = None
+        self._reconstructed_data: jax.Array | None = None
+
+    def _require_fit(self) -> None:
+        if self._modes is None or self._schur_tensor is None:
+            raise RuntimeError(f"{self.__class__.__name__} must be fitted before use.")
+
+    def fit(self, X: ArrayLike, Y: ArrayLike | None = None, *, check: bool | None = None) -> TDMD:
+        check = self.check if check is None else _resolve_check(check)
+        X_fit, Y_fit, snapshots = _prepare_fit_tensors(X, Y, self.transform, check=check)
+        modes, schur_tensor = _fit_tdmd(
+            X_fit,
+            Y_fit,
+            self.transform,
+            svd_threshold=self.svd_threshold,
+            signvals_threshold=self.signvals_threshold,
+            check=check,
+        )
+        amplitudes = _initial_amplitudes(modes, snapshots[:, :1, :], self.transform)
+
+        self._snapshots = snapshots
+        self._modes = modes
+        self._schur_tensor = schur_tensor
+        self._amplitudes = amplitudes
+        self._reconstructed_data = _forecast_tensor(
+            modes,
+            schur_tensor,
+            amplitudes,
+            snapshots.shape[1],
+            self.transform,
+        )
+        return self
+
+    def predict_next(self) -> jax.Array:
+        self._require_fit()
+        return self.predict_step(1)
+
+    def predict_step(self, step: int) -> jax.Array:
+        self._require_fit()
+        step = int(step)
+        if step < 0:
+            raise ValueError(f"Expected a non-negative step; got {step}.")
+        return _predict_snapshot(
+            self.modes,
+            self.schur_tensor,
+            self.amplitudes,
+            step,
+            self.transform,
+        )
+
+    def predict(self) -> jax.Array:
+        return self.predict_next()
+
+    def forecast(self, horizon: int) -> jax.Array:
+        self._require_fit()
+        horizon = int(horizon)
+        if horizon < 1:
+            raise ValueError(f"Expected a positive forecast horizon; got {horizon}.")
+        return _forecast_tensor(
+            self.modes,
+            self.schur_tensor,
+            self.amplitudes,
+            horizon,
+            self.transform,
+        )
+
+    @property
+    def snapshots(self) -> jax.Array:
+        self._require_fit()
+        return self._snapshots
+
+    @property
+    def modes(self) -> jax.Array:
+        self._require_fit()
+        return self._modes
+
+    @property
+    def schur_tensor(self) -> jax.Array:
+        self._require_fit()
+        return self._schur_tensor
+
+    @property
+    def amplitudes(self) -> jax.Array:
+        self._require_fit()
+        return self._amplitudes
+
+    @property
+    def eigs(self) -> jax.Array:
+        self._require_fit()
+        return _schur_eigenvalues(self.schur_tensor, self.transform)
+
+    @property
+    def reconstructed_data(self) -> jax.Array:
+        self._require_fit()
+        return self._reconstructed_data
+
+
+class TDMDII:
+    """pyDMD-style wrapper for the multirank TDMDII variant."""
+
+    def __init__(
+        self,
+        transform: LinearTransform,
+        *,
+        gamma: float = 0.99999,
+        signvals_threshold: float = 0.0,
+        check: bool = True,
+    ) -> None:
+        self.transform = transform
+        self.gamma = gamma
+        self.signvals_threshold = signvals_threshold
+        self.check = _resolve_check(check)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._snapshots: jax.Array | None = None
+        self._modes: jax.Array | None = None
+        self._schur_tensor: jax.Array | None = None
+        self._amplitudes: jax.Array | None = None
+        self._multirank: jax.Array | None = None
+        self._reconstructed_data: jax.Array | None = None
+
+    def _require_fit(self) -> None:
+        if self._modes is None or self._schur_tensor is None or self._amplitudes is None:
+            raise RuntimeError(f"{self.__class__.__name__} must be fitted before use.")
+
+    def fit(self, X: ArrayLike, Y: ArrayLike | None = None, *, check: bool | None = None) -> TDMDII:
+        check = self.check if check is None else _resolve_check(check)
+        X_fit, Y_fit, snapshots = _prepare_fit_tensors(X, Y, self.transform, check=check)
+        modes, schur_tensor, amplitudes, multirank = _fit_tdmdii(
+            X_fit,
+            Y_fit,
+            self.transform,
+            gamma=self.gamma,
+            signvals_threshold=self.signvals_threshold,
+            check=check,
+        )
+
+        self._snapshots = snapshots
+        self._modes = modes
+        self._schur_tensor = schur_tensor
+        self._amplitudes = amplitudes
+        self._multirank = multirank
+        self._reconstructed_data = _forecast_tensor(
+            modes,
+            schur_tensor,
+            amplitudes,
+            snapshots.shape[1],
+            self.transform,
+        )
+        return self
+
+    def predict_next(self) -> jax.Array:
+        self._require_fit()
+        return self.predict_step(1)
+
+    def predict_step(self, step: int) -> jax.Array:
+        self._require_fit()
+        step = int(step)
+        if step < 0:
+            raise ValueError(f"Expected a non-negative step; got {step}.")
+        return _predict_snapshot(
+            self.modes,
+            self.schur_tensor,
+            self.amplitudes,
+            step,
+            self.transform,
+        )
+
+    def predict(self) -> jax.Array:
+        return self.predict_next()
+
+    def forecast(self, horizon: int) -> jax.Array:
+        self._require_fit()
+        horizon = int(horizon)
+        if horizon < 1:
+            raise ValueError(f"Expected a positive forecast horizon; got {horizon}.")
+        return _forecast_tensor(
+            self.modes,
+            self.schur_tensor,
+            self.amplitudes,
+            horizon,
+            self.transform,
+        )
+
+    @property
+    def snapshots(self) -> jax.Array:
+        self._require_fit()
+        return self._snapshots
+
+    @property
+    def modes(self) -> jax.Array:
+        self._require_fit()
+        return self._modes
+
+    @property
+    def schur_tensor(self) -> jax.Array:
+        self._require_fit()
+        return self._schur_tensor
+
+    @property
+    def amplitudes(self) -> jax.Array:
+        self._require_fit()
+        return self._amplitudes
+
+    @property
+    def multirank(self) -> jax.Array:
+        self._require_fit()
+        return self._multirank
+
+    @property
+    def eigs(self) -> jax.Array:
+        self._require_fit()
+        return _schur_eigenvalues(self.schur_tensor, self.transform)
+
+    @property
+    def reconstructed_data(self) -> jax.Array:
+        self._require_fit()
+        return self._reconstructed_data
+
+
 @partial(jax.jit, static_argnames=("svd_threshold", "signvals_threshold"))
 def _tdmd_impl(
     X: ArrayLike,
@@ -63,7 +411,8 @@ def _tdmd_impl(
     svd_threshold: float,
     signvals_threshold: float,
 ) -> TDMDResult:
-    U_hat, S_hat, Vh_hat = _truncated_tsvd_impl(X, L, svd_threshold)
+    X_hat = L.to_slices(X)
+    U_hat, S_hat, Vh_hat = _truncated_tsvd_impl(X_hat, L, svd_threshold)
     Y_hat = L.to_slices(Y)
 
     Uh_hat = jnp.swapaxes(U_hat.conj(), 1, 2)
@@ -100,7 +449,7 @@ def _tdmdii_impl(
     modes_hat = U_hat @ W_hat
 
     X0_hat = L.to_slices(X[:, :1, :])
-    amplitudes_hat = jnp.swapaxes(modes_hat.conj(), 1, 2) @ X0_hat
+    amplitudes_hat = jax.vmap(lambda phi, x0: jnp.linalg.pinv(phi) @ x0)(modes_hat, X0_hat)
 
     return TDMDIIResult(
         L.from_slices(modes_hat),
@@ -110,64 +459,37 @@ def _tdmdii_impl(
     )
 
 
-def tdmd(
+def _fit_tdmd(
     X: ArrayLike,
     Y: ArrayLike,
     L: LinearTransform,
     svd_threshold: float = 0.0,
     signvals_threshold: float = 0.0,
+    *,
+    check: bool = True,
 ) -> TDMDResult:
-    """Compute tensor DMD modes and eigenvalues under the transform ``L``.
-
-    Args:
-        X: Snapshot tensor with shape ``(m, n, k)``.
-        Y: Time-shifted snapshot tensor aligned with ``X``.
-        L: Linear transform defining the tensor product algebra.
-        svd_threshold: Absolute tube-spectrum cutoff used to truncate the tensor SVD
-            of ``X`` before forming the reduced operator.
-        signvals_threshold: Absolute cutoff applied when inverting transformed
-            singular values. Singular values not greater than this threshold
-            are treated as zero in the pseudo-inverse.
-
-    Returns:
-        A tuple ``(modes, schur_tensor)`` where ``modes`` contains the tensor
-        DMD modes and ``schur_tensor`` contains the tensor Schur form of the
-        reduced operator.
-    """
-    svd_threshold = _validate_threshold(svd_threshold)
-    signvals_threshold = _validate_threshold(signvals_threshold)
+    check = _resolve_check(check)
+    X, Y = _validate_tensor_pair_inputs(X, Y, L) if check else (jnp.asarray(X), jnp.asarray(Y))
+    svd_threshold = _validate_threshold(svd_threshold) if check else float(svd_threshold)
+    signvals_threshold = (
+        _validate_threshold(signvals_threshold) if check else float(signvals_threshold)
+    )
     return _tdmd_impl(X, Y, L, svd_threshold, signvals_threshold)
 
 
-def tdmdii(
+def _fit_tdmdii(
     X: ArrayLike,
     Y: ArrayLike,
     L: LinearTransform,
     gamma: float = 0.99999,
     signvals_threshold: float = 0.0,
+    *,
+    check: bool = True,
 ) -> TDMDIIResult:
-    """Compute the multirank TDMDII variant under transform ``L``.
-
-    This variant follows the tr-tSVDMII truncation strategy from the
-    ``star_M``-DMDII framework, keeping transformed singular values globally
-    across faces until the retained squared-energy fraction reaches ``gamma``.
-
-    Args:
-        X: Snapshot tensor with shape ``(m, n, k)``.
-        Y: Time-shifted snapshot tensor aligned with ``X``.
-        L: Linear transform defining the tensor product algebra.
-        gamma: Energy-retention level in ``(0, 1]`` used for the multirank
-            truncation in the transform domain.
-        signvals_threshold: Absolute cutoff applied when inverting retained
-            transformed singular values.
-
-    Returns:
-        A tuple ``(modes, schur_tensor, amplitudes, multirank)`` where
-        ``multirank`` stores the retained rank of each transformed face.
-    """
-    gamma = float(gamma)
-    if gamma <= 0 or gamma > 1 or not jnp.isfinite(gamma):
-        raise ValueError(f"Expected gamma in (0, 1]; got {gamma}.")
-
-    signvals_threshold = _validate_threshold(signvals_threshold)
+    check = _resolve_check(check)
+    X, Y = _validate_tensor_pair_inputs(X, Y, L) if check else (jnp.asarray(X), jnp.asarray(Y))
+    gamma = _validate_gamma(gamma) if check else float(gamma)
+    signvals_threshold = (
+        _validate_threshold(signvals_threshold) if check else float(signvals_threshold)
+    )
     return _tdmdii_impl(X, Y, L, gamma, signvals_threshold)

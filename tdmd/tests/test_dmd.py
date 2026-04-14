@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from tdmd.core.dmd import tdmd, tdmdii
+from tdmd.core.dmd import TDMD, TDMDII
 from tdmd.core.tensor_product import FFTTransform
 
 
@@ -10,90 +10,116 @@ def _random_tensor(key, shape):
     return jax.random.normal(key, shape)
 
 
-def test_tdmd_shapes():
+def test_tdmd_fit_shapes():
     key = jax.random.PRNGKey(10)
-    X = _random_tensor(key, (5, 4, 3))
-    Y = _random_tensor(key, (5, 4, 3))
-    L = FFTTransform()
+    snapshots = _random_tensor(key, (5, 6, 3))
+    model = TDMD(FFTTransform(), svd_threshold=0.0)
 
-    modes, schur = tdmd(X, Y, L, svd_threshold=0.0)
+    model.fit(snapshots)
 
-    assert modes.shape == X.shape
-    assert schur.shape[0] == schur.shape[1]
-
-
-def test_tdmd_zero_input():
-    X = jnp.zeros((4, 4, 2))
-    Y = jnp.zeros((4, 4, 2))
-    L = FFTTransform()
-
-    modes, schur = tdmd(X, Y, L)
-
-    assert jnp.allclose(modes, 0)
-    assert jnp.allclose(schur, 0)
+    assert model.modes.shape == snapshots[:, :-1, :].shape
+    assert model.schur_tensor.shape[0] == model.schur_tensor.shape[1]
+    assert model.reconstructed_data.shape == snapshots.shape
 
 
-def test_tdmd_consistency():
+def test_tdmd_zero_input_reconstruction():
+    snapshots = jnp.zeros((4, 5, 2))
+    model = TDMD(FFTTransform())
+
+    model.fit(snapshots)
+
+    assert jnp.allclose(model.modes, 0)
+    assert jnp.allclose(model.schur_tensor, 0)
+    assert jnp.allclose(model.reconstructed_data, 0)
+
+
+def test_tdmd_consistency_for_identity_dynamics():
     key = jax.random.PRNGKey(42)
     X = _random_tensor(key, (6, 5, 3))
-    Y = X.copy()  # identity dynamics
-    L = FFTTransform()
+    model = TDMD(FFTTransform(), svd_threshold=1e-6)
 
-    modes, schur = tdmd(X, Y, L, svd_threshold=1e-6)
+    model.fit(X, X)
 
-    norm_modes = jnp.linalg.norm(modes)
-    schur_hat = L.to_slices(schur)
+    schur_hat = model.transform.to_slices(model.schur_tensor)
     eye = jnp.eye(schur_hat.shape[-1], dtype=schur_hat.dtype)[None, :, :]
 
-    assert jnp.isfinite(norm_modes)
-    assert norm_modes > 0
+    assert jnp.isfinite(jnp.linalg.norm(model.modes))
     assert jnp.allclose(schur_hat, eye, atol=1e-5)
 
 
-def test_tdmd_signvals_threshold_zeros_small_modes():
-    X = jnp.zeros((2, 2, 1), dtype=jnp.float32)
-    X = X.at[0, 0, 0].set(2.0)
-    X = X.at[1, 1, 0].set(0.25)
-    Y = X
-    L = FFTTransform()
-
-    _, schur = tdmd(X, Y, L, signvals_threshold=0.5)
-    schur_hat = L.to_slices(schur)
-
-    assert jnp.allclose(jnp.diagonal(schur_hat, axis1=1, axis2=2), jnp.array([[1.0, 0.0]]))
-
-
 def test_tdmd_rejects_invalid_signvals_threshold():
-    X = jnp.ones((2, 2, 1))
-    Y = X
+    snapshots = jnp.ones((2, 3, 1))
+    model = TDMD(FFTTransform(), signvals_threshold=-1.0)
 
     with pytest.raises(ValueError, match="finite non-negative threshold"):
-        tdmd(X, Y, FFTTransform(), signvals_threshold=-1.0)
+        model.fit(snapshots[:, :-1, :], snapshots[:, 1:, :])
+
+
+def test_tdmd_can_skip_threshold_validation():
+    snapshots = jnp.ones((2, 3, 1))
+    model = TDMD(FFTTransform(), signvals_threshold=-1.0, check=False)
+
+    model.fit(snapshots[:, :-1, :], snapshots[:, 1:, :], check=False)
+
+    assert model.modes.shape == snapshots[:, :-1, :].shape
+    assert model.schur_tensor.shape[2] == snapshots.shape[2]
 
 
 def test_tdmdii_shapes_and_multirank():
-    X = jnp.zeros((3, 4, 2), dtype=jnp.float32)
-    X = X.at[0, 0, 0].set(3.0)
-    X = X.at[1, 1, 0].set(1.0)
-    X = X.at[0, 0, 1].set(0.5)
-    X = X.at[1, 1, 1].set(0.25)
-    Y = X
+    snapshots = jnp.zeros((3, 5, 2), dtype=jnp.float32)
+    snapshots = snapshots.at[0, :, 0].set(jnp.array([3.0, 2.0, 1.0, 0.5, 0.25]))
+    snapshots = snapshots.at[1, :, 1].set(jnp.array([1.0, 0.75, 0.5, 0.25, 0.125]))
+    model = TDMDII(FFTTransform(), gamma=0.95)
 
-    modes, schur, amplitudes, multirank = tdmdii(X, Y, FFTTransform(), gamma=0.95)
+    model.fit(snapshots)
 
-    assert modes.shape[0] == X.shape[0]
-    assert modes.shape[2] == X.shape[2]
-    assert schur.shape[0] == schur.shape[1]
-    assert schur.shape[2] == X.shape[2]
-    assert amplitudes.shape[1] == 1
-    assert amplitudes.shape[2] == X.shape[2]
-    assert multirank.shape == (X.shape[2],)
-    assert int(multirank[0]) >= int(multirank[1])
+    assert model.modes.shape[0] == snapshots.shape[0]
+    assert model.modes.shape[2] == snapshots.shape[2]
+    assert model.schur_tensor.shape[0] == model.schur_tensor.shape[1]
+    assert model.schur_tensor.shape[2] == snapshots.shape[2]
+    assert model.amplitudes.shape[1] == 1
+    assert model.amplitudes.shape[2] == snapshots.shape[2]
+    assert model.multirank.shape == (snapshots.shape[2],)
+    assert int(model.multirank[0]) >= int(model.multirank[1])
 
 
 def test_tdmdii_rejects_invalid_gamma():
-    X = jnp.ones((2, 2, 1))
-    Y = X
+    snapshots = jnp.ones((2, 3, 1))
+    model = TDMDII(FFTTransform(), gamma=0.0)
 
-    with pytest.raises(ValueError, match="Expected gamma in"):
-        tdmdii(X, Y, FFTTransform(), gamma=0.0)
+    with pytest.raises(ValueError, match="Expected a finite gamma in"):
+        model.fit(snapshots[:, :-1, :], snapshots[:, 1:, :])
+
+
+def test_tdmd_wrapper_prediction_api():
+    key = jax.random.PRNGKey(7)
+    snapshots = _random_tensor(key, (5, 6, 3))
+    model = TDMD(FFTTransform(), svd_threshold=1.0e-6)
+
+    model.fit(snapshots)
+
+    assert model.predict_next().shape == (snapshots.shape[0], snapshots.shape[2])
+    assert model.predict_step(4).shape == (snapshots.shape[0], snapshots.shape[2])
+    assert model.predict().shape == (snapshots.shape[0], snapshots.shape[2])
+    assert model.forecast(7).shape == (snapshots.shape[0], 7, snapshots.shape[2])
+
+
+def test_tdmdii_wrapper_prediction_api():
+    snapshots = jnp.zeros((3, 5, 2), dtype=jnp.float32)
+    snapshots = snapshots.at[0, :, 0].set(jnp.array([3.0, 2.0, 1.0, 0.5, 0.25]))
+    snapshots = snapshots.at[1, :, 1].set(jnp.array([1.0, 0.75, 0.5, 0.25, 0.125]))
+    model = TDMDII(FFTTransform(), gamma=0.95)
+
+    model.fit(snapshots)
+
+    assert model.predict_next().shape == (snapshots.shape[0], snapshots.shape[2])
+    assert model.predict_step(3).shape == (snapshots.shape[0], snapshots.shape[2])
+    assert model.forecast(6).shape == (snapshots.shape[0], 6, snapshots.shape[2])
+
+
+def test_tdmd_wrapper_rejects_negative_step():
+    model = TDMD(FFTTransform())
+    model.fit(jnp.ones((2, 3, 1)))
+
+    with pytest.raises(ValueError, match="non-negative step"):
+        model.predict_step(-1)
