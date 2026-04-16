@@ -421,7 +421,7 @@ def _tdmd_impl(
 
     A_tilde_hat = Uh_hat @ Y_hat @ V_hat @ S_hat_inv
     T_hat, W_hat = jsc.linalg.schur(A_tilde_hat)
-    modes_hat = U_hat @ W_hat
+    modes_hat = Y_hat @ V_hat @ S_hat_inv @ W_hat
 
     return TDMDResult(L.from_slices(modes_hat), L.from_slices(T_hat))
 
@@ -446,7 +446,7 @@ def _tdmdii_impl(
 
     A_tilde_hat = Uh_hat @ Y_hat @ V_hat @ S_hat_inv
     T_hat, W_hat = jsc.linalg.schur(A_tilde_hat)
-    modes_hat = U_hat @ W_hat
+    modes_hat = Y_hat @ V_hat @ S_hat_inv @ W_hat
 
     X0_hat = L.to_slices(X[:, :1, :])
     amplitudes_hat = jax.vmap(lambda phi, x0: jnp.linalg.pinv(phi) @ x0)(modes_hat, X0_hat)
